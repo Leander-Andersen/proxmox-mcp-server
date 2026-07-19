@@ -9,7 +9,7 @@ account_id = "fa8dc1730bfd7b376de59d07758e28b5"
 # then paste the returned id below.
 [[kv_namespaces]]
 binding = "PROXMOX_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "3a7658c1e81e4de495778cc105d0a929"
 
 [observability]
 enabled = true
