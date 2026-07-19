@@ -1,0 +1,24 @@
+# Copy to .dev.vars for `wrangler dev`. .dev.vars is gitignored -- never commit real values.
+
+# Password you type on the /oauth/authorize page when adding the claude.ai connector.
+MCP_API_KEY="choose-a-long-random-string"
+
+# --- Phase 1: Proxmox REST API ---
+# Tunnel hostname pointing at pveproxy :8006. No trailing slash.
+PVE_HOST="https://pve-api.example.com"
+# Format: user@realm!tokenid=uuid
+PVE_TOKEN="claude@pve!mcp=00000000-0000-0000-0000-000000000000"
+CF_ACCESS_CLIENT_ID="....access"
+CF_ACCESS_CLIENT_SECRET="...."
+
+# --- Phase 2: exec bridge (leave unset until the bridge is deployed) ---
+# When EXEC_HOST is unset the run_script tool is not registered at all.
+EXEC_HOST="https://pve-exec.example.com"
+EXEC_CF_ACCESS_CLIENT_ID="....access"
+EXEC_CF_ACCESS_CLIENT_SECRET="...."
+# Shared secret also set as EXEC_SHARED_SECRET on the bridge. Optional but recommended.
+EXEC_SHARED_SECRET="another-long-random-string"
+# OS password for the bridge user, used only for `target: "host"` sudo.
+EXEC_SUDO_PASSWORD="...."
+# "true" or "false" -- the kill switch for sudo on the Proxmox host.
+EXEC_SUDO_ENABLED="false"

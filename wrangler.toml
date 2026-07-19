@@ -1,0 +1,19 @@
+name = "proxmox-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "fa8dc1730bfd7b376de59d07758e28b5"
+
+# Used only to enforce one-time use of OAuth authorization codes.
+# Create with:  npx wrangler kv namespace create PROXMOX_KV
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "PROXMOX_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[observability]
+enabled = true
+
+# All configuration is delivered as secrets, never as [vars] -- secrets survive
+# a git-triggered redeploy, so EXEC_SUDO_ENABLED can be flipped out-of-band
+# without a push. See README.md.
