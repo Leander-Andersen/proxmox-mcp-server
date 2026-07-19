@@ -48,15 +48,18 @@ Set these up before deploying:
 This repo is wired for Cloudflare's git integration — pushing to `main`
 builds and deploys automatically.
 
-1. Push this directory to its own GitHub repo.
-2. In the Cloudflare dashboard (**Leander.yeboy@outlook.com's account**):
-   **Workers & Pages -> Create -> Workers -> Import a repository**, pick the
-   repo, and accept the defaults (build `npm install`, deploy `npx wrangler deploy`).
-3. Create the KV namespace and paste its id into `wrangler.toml`:
+1. Create the KV namespace and paste its id into `wrangler.toml`, replacing
+   `REPLACE_WITH_KV_NAMESPACE_ID`:
    ```bash
    npx wrangler kv namespace create PROXMOX_KV
    ```
-   This is only used to stop an OAuth authorization code being redeemed twice.
+   Do this **before** connecting the repo — the placeholder id fails the build.
+   The namespace is only used to stop an OAuth authorization code being
+   redeemed twice.
+2. Push this directory to its own GitHub repo.
+3. In the Cloudflare dashboard (**Leander.yeboy@outlook.com's account**):
+   **Workers & Pages -> Create -> Workers -> Import a repository**, pick the
+   repo, and accept the defaults (build `npm install`, deploy `npx wrangler deploy`).
 4. Set the secrets (dashboard **Settings -> Variables and Secrets**, or CLI):
    ```bash
    npx wrangler secret put MCP_API_KEY              # password you'll type when connecting
