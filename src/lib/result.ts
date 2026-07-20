@@ -2,8 +2,20 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 export type ToolResult = CallToolResult;
 
+/**
+ * Above this many characters, indentation stops being worth its weight -- a
+ * week of rrddata is mostly whitespace when pretty-printed.
+ */
+const PRETTY_PRINT_LIMIT = 2000;
+
 export function ok(data: unknown): ToolResult {
-  const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+  let text: string;
+  if (typeof data === "string") {
+    text = data;
+  } else {
+    const pretty = JSON.stringify(data, null, 2);
+    text = pretty.length > PRETTY_PRINT_LIMIT ? JSON.stringify(data) : pretty;
+  }
   return { content: [{ type: "text", text }] };
 }
 

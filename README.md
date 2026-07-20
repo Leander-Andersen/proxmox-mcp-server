@@ -50,6 +50,13 @@ Things you can ask for directly:
 - *"What storage do I have configured?"* — no dedicated tool, so this falls to
   `pve_api` with `GET /nodes/<node>/storage`.
 
+**Large endpoints can be trimmed server-side.** `pve_api` takes `fields`,
+`omit_fields` and `limit`, applied before the response is serialised. A week of
+`rrddata` is ~330 points of ~20 metrics; asking for
+`fields: ["time","mem","maxmem"]` cuts it by roughly 70%, and adding `limit`
+takes it past 90%. `omit_fields: ["description"]` is worth reaching for on
+guest configs, which community install scripts fill with large HTML blobs.
+
 With the bridge installed you additionally get `run_script`:
 
 - *"Check disk usage inside container 101."* — runs `df -h` via `pct exec`.
@@ -229,22 +236,76 @@ curl -s localhost:8787/mcp -H "Authorization: Bearer $TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-## What is and isn't a security boundary
+## Privilege model
 
-Real boundaries:
+Worth reading once rather than inferring, because the parts interact in ways
+that are easy to get wrong.
 
-- **Cloudflare Access** in front of both tunnel hostnames — nothing reaches
-  Proxmox without the service token.
-- **The bearer token** on `/mcp`, derived by HMAC from `MCP_API_KEY`.
-- **The PVE API token's role** — the ceiling on what the API tools can do.
-- **The bridge user's sudoers file** and **`EXEC_SUDO_ENABLED`**.
+### What the tool layer blocks
 
-Convenience only, not boundaries:
+| Blocked | Where |
+|---|---|
+| `DELETE`, every path | `pve_api` — the only hard write-wall in the Worker |
+| Non-GET to `/access/*` and `/cluster/config/*` | `pve_api` |
+| Writes to `/etc/pve`, `rm -rf` on system paths, `mkfs`, `passwd`, reboots | `run_script` deny-list |
 
-- The `pve_api` guardrails (no `DELETE`, no writes to `/access` or
-  `/cluster/config`) and the `run_script` deny-list. They stop an obvious
-  mistake; they are pattern matches and will not stop a determined encoding.
-  **Set the API token's permissions as though these did not exist.**
+### What it deliberately does not block
+
+- **`POST` and `PUT` to everything else.** These reach Proxmox and are gated by
+  the **API token's role**, not by this Worker. If you widen that role, the
+  Worker will not be what stops a destructive write.
+- **Reads of `/etc/pve`.** The `run_script` guard is *write-scoped*. `ls` and
+  `cat` pass — which is harmless, because the files inside are `root:www-data
+  0640` and the unprivileged bridge user cannot read them anyway.
+- **Arbitrary host commands.** The deny-list is a small blocklist of obviously
+  destructive patterns. It does not reason about whether a command is harmful.
+  `rm -f somefile` on the host runs and is stopped only by filesystem
+  permissions.
+
+### How privilege actually works
+
+This is the part most often stated incorrectly. The bridge account is **not**
+free of sudo rights:
+
+```
+claude ALL=(root) NOPASSWD: /usr/sbin/pct exec *
+claude ALL=(root) NOPASSWD: /usr/sbin/qm guest exec *
+```
+
+Those are **NOPASSWD**, so they apply *regardless of `EXEC_SUDO_ENABLED`* —
+which is exactly why `run_script` gets root inside any container while
+`/health` reports `sudo_enabled: false`. And `pct exec` into a **privileged**
+container is a well-known route back to root on the host.
+
+`EXEC_SUDO_ENABLED` governs one narrow thing: whether the Worker attaches a
+password, which only affects `target: "host"`. It is not a global privilege
+switch, and it does not gate container access.
+
+If the host was installed with `--with-host-sudo`, the account is additionally
+in the `sudo` group with a password — full root, password-gated.
+
+Check what is actually granted rather than assuming:
+
+```bash
+sudo -l -U claude
+```
+
+### The real boundaries
+
+In rough order of how much they carry:
+
+1. **Cloudflare Access** on both tunnel hostnames — nothing reaches Proxmox
+   without the service token.
+2. **The PVE API token's role** — the ceiling on every API tool, and the only
+   thing gating non-DELETE writes.
+3. **The bridge user's sudoers file** — the ceiling on `run_script`. Broad by
+   design, since `pct exec` is the whole point.
+4. **The bearer token** on `/mcp`, HMAC-derived from `MCP_API_KEY`.
+5. **`EXEC_SUDO_ENABLED`** — host-sudo only, per the caveat above.
+
+Everything in "what the tool layer blocks" is a **speed bump, not a boundary**.
+Those are pattern matches; a determined encoding walks through them. Set the API
+token's role and the sudoers file as though the guardrails did not exist.
 
 Nothing sensitive is committed here. Credentials live in Worker secrets, and
 local values in `.dev.vars`, which is gitignored — `.dev.vars.example` shows
