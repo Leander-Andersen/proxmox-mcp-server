@@ -1,4 +1,6 @@
-name = "proxmox-mcp"
+# Must match the repo name -- Workers Builds derives the Worker name from the
+# connected repository and overrides a mismatch (then offers a PR to fix it).
+name = "proxmox-mcp-server"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]

@@ -119,7 +119,7 @@ and deploys automatically.
    `[vars]` and no real hostname is committed anywhere in this repo.
 4. Check it came up:
    ```bash
-   curl https://proxmox-mcp.<subdomain>.workers.dev/health
+   curl https://proxmox-mcp-server.<subdomain>.workers.dev/health
    ```
    You want `"pve_configured": true`. If a `/health` call returns HTML rather
    than JSON, Access rejected the service token.
@@ -127,7 +127,7 @@ and deploys automatically.
 ### Connect it to Claude
 
 In claude.ai: **Settings → Connectors → Add custom connector**, URL
-`https://proxmox-mcp.<subdomain>.workers.dev/mcp`. You will be sent to an
+`https://proxmox-mcp-server.<subdomain>.workers.dev/mcp`. You will be sent to an
 authorize page — enter the `MCP_API_KEY` value. Only `claude.ai` and
 `claude.com` redirect URIs are accepted.
 
