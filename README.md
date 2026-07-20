@@ -152,6 +152,59 @@ targeting `host` run as the unprivileged bridge user. Claude is never told the
 password and it never appears in a tool result. Flipping it takes effect on the
 next request — no redeploy, no push.
 
+## Configuration reference
+
+Everything is a Worker **secret** — there are no `[vars]`. Secrets are the only
+binding type that survives `wrangler deploy`, so a value set in the dashboard is
+never silently reverted by an unrelated code push. `EXEC_SUDO_ENABLED` is a
+secret for that reason alone, not because `"true"`/`"false"` is sensitive.
+
+Set any of them with `npx wrangler secret put <NAME>`, or in the dashboard under
+**Settings → Variables and Secrets**.
+
+### Phase 1 — required
+
+| Secret | What it is | Where it comes from |
+|---|---|---|
+| `MCP_API_KEY` | Password you type on the authorize page when adding the connector. Also the HMAC key for the bearer tokens the Worker issues. | You invent it. `openssl rand -hex 32` |
+| `PVE_HOST` | Origin of the tunnel hostname in front of pveproxy `:8006`. No trailing slash, no `/api2/json`. | Your Cloudflare Tunnel |
+| `PVE_TOKEN` | Full Proxmox API token, `user@realm!tokenid=uuid` — all three parts, not just the secret. | *Datacenter → Permissions → API Tokens* |
+| `CF_ACCESS_CLIENT_ID` | Access service token id, ends in `.access`. | *Zero Trust → Access → Service Auth* |
+| `CF_ACCESS_CLIENT_SECRET` | The secret half. Shown once. | ditto |
+
+### Phase 2 — optional
+
+`run_script` is not registered at all unless `EXEC_HOST` is set. Setting it
+without the rest means Claude sees the tool and every call fails, so set them
+together.
+
+| Secret | What it is | Where it comes from |
+|---|---|---|
+| `EXEC_HOST` | Origin of the tunnel hostname in front of the bridge `:5000`. | Your Cloudflare Tunnel |
+| `EXEC_CF_ACCESS_CLIENT_ID` | Service token for that hostname. Service tokens are account-level, so the Phase 1 pair may be reused — the token just has to be in that application's policy. | *Zero Trust → Access → Service Auth* |
+| `EXEC_CF_ACCESS_CLIENT_SECRET` | ditto | ditto |
+| `EXEC_SHARED_SECRET` | Second check behind Access. Must match the bridge. | `cat /etc/claude-exec.env` on the host |
+| `EXEC_SUDO_ENABLED` | `"true"` lets `target: "host"` escalate with sudo. **Any other value, or absent, disables it.** | You choose |
+| `EXEC_SUDO_PASSWORD` | OS password of the bridge user. Only read when `EXEC_SUDO_ENABLED` is exactly `"true"`; never returned in a tool result. | The password set by `install.sh --with-host-sudo` |
+
+### Bindings
+
+| Binding | Purpose |
+|---|---|
+| `PROXMOX_KV` | Marks OAuth authorization codes as spent so one cannot be redeemed twice. Entries expire after 5 minutes. Optional — without it the connector still works, you just lose replay protection. |
+
+### Checking what is set
+
+`GET /health` reports configuration state without exposing any value:
+
+```json
+{"status":"ok","version":"1.0.0","pve_configured":true,"exec_configured":true,"sudo_enabled":false}
+```
+
+`pve_configured` means `PVE_HOST` and `PVE_TOKEN` are both present, not that
+they are correct. `exec_configured` reflects `EXEC_HOST` alone — it is what
+decides whether `run_script` appears.
+
 ## Local development
 
 ```bash
