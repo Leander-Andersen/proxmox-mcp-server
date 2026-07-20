@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { PveClient } from "../lib/pve.js";
 import { run } from "../lib/result.js";
+import { listProjectionInput, project, projectionInput, toOptions } from "../lib/project.js";
 
 /** Shared shape: identify a guest, letting the Worker fill in node/type. */
 export const guestTarget = {
@@ -22,13 +23,22 @@ export function registerGuestTools(server: McpServer, pve: PveClient): void {
     {
       title: "List guests",
       description:
-        "List every VM and LXC container in the Proxmox cluster with its id, name, node, status and resource usage.",
-      inputSchema: {},
+        "List every VM and LXC container in the Proxmox cluster with its id, name, node, status and " +
+        "resource usage. On a large fleet, pass fields (e.g. ['vmid','name','status']) to trim the " +
+        "response, or status to list only what is running.",
+      inputSchema: {
+        status: z
+          .enum(["running", "stopped"])
+          .optional()
+          .describe("Only return guests in this state."),
+        ...listProjectionInput,
+      },
     },
-    async () =>
+    async ({ status, fields, omit_fields, limit }) =>
       run(async () => {
         const resources = await pve.clusterResources();
-        return resources
+        const rows = resources
+          .filter((r) => !status || r.status === status)
           .sort((a, b) => a.vmid - b.vmid)
           .map((r) => ({
             vmid: r.vmid,
@@ -43,6 +53,7 @@ export function registerGuestTools(server: McpServer, pve: PveClient): void {
             maxmem: r.maxmem,
             uptime: r.uptime,
           }));
+        return project(rows, toOptions({ fields, omit_fields, limit }));
       }),
   );
 
@@ -51,12 +62,13 @@ export function registerGuestTools(server: McpServer, pve: PveClient): void {
     {
       title: "Get guest status",
       description: "Current runtime status of one VM or container: state, uptime, cpu, memory, disk.",
-      inputSchema: guestTarget,
+      inputSchema: { ...guestTarget, ...projectionInput },
     },
-    async ({ vmid, node, type }) =>
+    async ({ vmid, node, type, fields, omit_fields }) =>
       run(async () => {
         const t = await pve.resolveGuest(vmid, node, type);
-        return pve.fetch("GET", `/nodes/${t.node}/${t.type}/${vmid}/status/current`);
+        const data = await pve.fetch("GET", `/nodes/${t.node}/${t.type}/${vmid}/status/current`);
+        return project(data, toOptions({ fields, omit_fields }));
       }),
   );
 

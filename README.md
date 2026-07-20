@@ -50,12 +50,32 @@ Things you can ask for directly:
 - *"What storage do I have configured?"* — no dedicated tool, so this falls to
   `pve_api` with `GET /nodes/<node>/storage`.
 
-**Large endpoints can be trimmed server-side.** `pve_api` takes `fields`,
-`omit_fields` and `limit`, applied before the response is serialised. A week of
-`rrddata` is ~330 points of ~20 metrics; asking for
-`fields: ["time","mem","maxmem"]` cuts it by roughly 70%, and adding `limit`
-takes it past 90%. `omit_fields: ["description"]` is worth reaching for on
-guest configs, which community install scripts fill with large HTML blobs.
+**Responses can be trimmed server-side.** `pve_api`, `list_guests`,
+`guest_status`, `node_status` and `list_tasks` all take `fields` and
+`omit_fields`; the list-shaped ones also take `limit`, which keeps the most
+recent entries. Trimming happens before the payload is serialised, so it is a
+real saving rather than a display filter.
+
+Where it matters most:
+
+- A week of `rrddata` is ~330 points of ~20 metrics. Asking for
+  `fields: ["time","mem","maxmem"]` cuts roughly 70%; adding `limit` takes it
+  past 90%.
+- Guest configs from community install scripts carry large HTML blobs in
+  `description`. `omit_fields: ["description"]` removes ~96% of a config read.
+- `list_guests` also takes `status: "running"` to skip stopped guests entirely.
+
+Two things happen automatically, with no parameters:
+
+- **`task_status` fetches the task log only when the task failed or is still
+  running.** The log of a successful start is noise, and this is the most-called
+  tool since every write returns a UPID. Pass `log: true` to force it.
+- **Responses over 2000 characters drop JSON indentation**, worth about a third
+  of a large payload. Smaller ones stay pretty-printed.
+- **`run_script` output is capped at 40000 characters** (~10k tokens), cut from
+  the middle so both ends survive, with a marker saying how much was dropped.
+  Raise it per-call with `max_output` — but filtering on the host with `grep`,
+  `tail -n` or `journalctl -n` is almost always better.
 
 With the bridge installed you additionally get `run_script`:
 
