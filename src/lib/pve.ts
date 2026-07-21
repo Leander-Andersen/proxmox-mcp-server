@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { Env } from "../env.js";
 
 export type GuestType = "qemu" | "lxc";
@@ -19,6 +20,73 @@ export interface ClusterResource {
 export type PveParams = Record<string, string | number | boolean | undefined>;
 
 /**
+ * A Proxmox node name, constrained to a DNS label.
+ *
+ * This is load-bearing, not cosmetic. `node` is interpolated into an API path,
+ * and `new URL` resolves `..` segments and drops everything after a `#`, so an
+ * unconstrained value lets a caller rewrite the path a tool thinks it is
+ * building -- including the tail, by terminating it with `?`. Guest tools then
+ * become arbitrary API calls. resolvePath below is the second half of the fix;
+ * either alone would do, and both together mean a tool that forgets to validate
+ * still cannot escape /api2/json.
+ */
+export const NODE_NAME = /^[A-Za-z0-9][A-Za-z0-9.-]*$/;
+
+export function isValidNodeName(name: string): boolean {
+  return NODE_NAME.test(name) && !name.includes("..") && name.length <= 253;
+}
+
+export function assertNodeName(name: string): void {
+  if (!isValidNodeName(name)) {
+    throw new Error(
+      `"${name}" is not a valid Proxmox node name. Node names are DNS labels -- letters, digits, ` +
+        `dots and hyphens only. Use list_nodes to see the real names.`,
+    );
+  }
+}
+
+/** Shared schema fragment so every tool constrains `node` the same way. */
+export const nodeNameSchema = z
+  .string()
+  .refine(isValidNodeName, "Node names are DNS labels -- letters, digits, dots and hyphens only.");
+
+export interface ResolvedPath {
+  url: URL;
+  /** The path as Proxmox will see it, relative to /api2/json. */
+  apiPath: string;
+}
+
+/**
+ * Resolves an API path against the base URL and refuses anything that escapes
+ * /api2/json once the URL parser has had its say.
+ *
+ * A query string in `path` is still supported -- callers rely on it and it
+ * cannot be used to traverse. A fragment is rejected outright: `fetch` never
+ * transmits one, so accepting it would mean silently sending a different path
+ * than the caller wrote.
+ */
+export function resolvePath(base: string, path: string): ResolvedPath {
+  if (path.includes("#")) {
+    throw new Error(
+      "API paths may not contain '#'. A fragment is never sent to the server, so this would " +
+        "silently request a different path than the one written.",
+    );
+  }
+
+  const root = new URL(`${base.replace(/\/+$/, "")}/api2/json/`);
+  const url = new URL(`${base.replace(/\/+$/, "")}/api2/json${path}`);
+
+  if (url.origin !== root.origin || !url.pathname.startsWith(root.pathname)) {
+    throw new Error(
+      `Refusing to call "${path}": it resolves to ${url.pathname}, outside the Proxmox API root ` +
+        `${root.pathname}. Paths may not use ".." to climb out.`,
+    );
+  }
+
+  return { url, apiPath: url.pathname.slice(root.pathname.length - 1) };
+}
+
+/**
  * Talks to the Proxmox REST API through the Cloudflare tunnel, adding both the
  * PVE API token and the CF Access service-token headers.
  *
@@ -34,9 +102,14 @@ export class PveClient {
     this.base = env.PVE_HOST.replace(/\/+$/, "");
   }
 
+  /** Resolves a path against this client's base, refusing anything that escapes. */
+  resolve(path: string): ResolvedPath {
+    return resolvePath(this.base, path);
+  }
+
   async fetch(method: string, path: string, params?: PveParams): Promise<unknown> {
     const upper = method.toUpperCase();
-    const url = new URL(`${this.base}/api2/json${path}`);
+    const { url } = this.resolve(path);
 
     const entries = Object.entries(params ?? {}).filter(([, v]) => v !== undefined);
     // PVE expects booleans as 1/0 rather than "true"/"false".
@@ -126,6 +199,7 @@ export class PveClient {
     node?: string,
     type?: GuestType,
   ): Promise<{ node: string; type: GuestType }> {
+    if (node !== undefined) assertNodeName(node);
     if (node && type) return { node, type };
 
     const match = (await this.clusterResources()).find(
@@ -145,6 +219,7 @@ export class PveClient {
    * caller can omit it; on a real cluster it becomes required.
    */
   async resolveNode(node?: string): Promise<string> {
+    if (node !== undefined) assertNodeName(node);
     if (node) return node;
     const nodes = await this.nodes();
     if (nodes.length === 1) return nodes[0].node;

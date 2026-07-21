@@ -70,16 +70,29 @@ export function registerPassthroughTool(server: McpServer, pve: PveClient): void
         );
       }
 
+      // The prefix check has to run against the path Proxmox will actually see,
+      // not the one the caller wrote: `new URL` collapses `..`, so checking the
+      // raw string let "/nodes/pve/../../access/acl" through as a write to
+      // /access/acl. Resolve first, then decide.
+      let apiPath: string;
+      try {
+        apiPath = pve.resolve(normalized).apiPath;
+      } catch (e) {
+        return fail(e instanceof Error ? e.message : String(e));
+      }
+
       if (method !== "GET") {
-        const blocked = READ_ONLY_PREFIXES.find((p) => normalized.startsWith(p));
+        const blocked = READ_ONLY_PREFIXES.find((p) => apiPath.startsWith(p));
         if (blocked) {
           return fail(
             `Writes to ${blocked}* are blocked through pve_api. This path is read-only for the connector.`,
           );
         }
         // Deliberate audit trail: every mutation is visible in `wrangler tail`.
+        // Log the resolved path: what was requested is only interesting insofar
+        // as it says what was actually called.
         console.log(
-          `pve_api mutation: ${method} ${normalized} params=${JSON.stringify(params ?? {})}`,
+          `pve_api mutation: ${method} ${apiPath} params=${JSON.stringify(params ?? {})}`,
         );
       }
 

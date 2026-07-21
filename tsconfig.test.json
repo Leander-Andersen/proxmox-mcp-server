@@ -1,0 +1,10 @@
+// Emits just the pure path/validation helpers into dist/ so test/paths.mjs can
+// exercise the real implementation rather than a copy of it.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist"
+  },
+  "include": ["src/lib/pve.ts", "src/env.ts"]
+}

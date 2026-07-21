@@ -1,14 +1,13 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { PveClient } from "../lib/pve.js";
+import { nodeNameSchema, type PveClient } from "../lib/pve.js";
 import { run } from "../lib/result.js";
 import { listProjectionInput, project, projectionInput, toOptions } from "../lib/project.js";
 
 /** Shared shape: identify a guest, letting the Worker fill in node/type. */
 export const guestTarget = {
   vmid: z.number().int().positive().describe("Numeric ID of the VM or container."),
-  node: z
-    .string()
+  node: nodeNameSchema
     .optional()
     .describe("Node name. Optional -- resolved from the vmid when omitted."),
   type: z

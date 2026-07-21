@@ -96,14 +96,20 @@ export function hasProjection(opts: ProjectOptions): boolean {
 export function clampOutput(text: string, max: number): string {
   if (text.length <= max) return text;
 
-  const head = Math.floor(max * 0.6);
-  const tail = max - head;
-  const omitted = text.length - max;
-
-  return (
-    text.slice(0, head) +
+  const notice = (omitted: number) =>
     `\n\n... [${omitted} characters omitted -- ${text.length} total. ` +
-    `Filter on the host (grep, tail -n, journalctl -n) or raise max_output.] ...\n\n` +
-    text.slice(-tail)
-  );
+    `Filter on the host (grep, tail -n, journalctl -n) or raise max_output.] ...\n\n`;
+
+  // The notice counts against the budget. `max` is what the caller asked to
+  // receive, not what they asked to keep before we append our own commentary --
+  // run_script clamps stdout and stderr separately, so overshooting on both
+  // doubled the error. Budgeting with text.length is a safe over-estimate,
+  // since `omitted` can never have more digits than it does.
+  const budget = Math.max(0, max - notice(text.length).length);
+  const head = Math.floor(budget * 0.6);
+  const tail = budget - head;
+  const omitted = text.length - budget;
+
+  // slice(-0) returns the whole string, so an empty tail has to be special-cased.
+  return text.slice(0, head) + notice(omitted) + (tail > 0 ? text.slice(-tail) : "");
 }

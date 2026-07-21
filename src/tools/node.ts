@@ -1,11 +1,10 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { PveClient } from "../lib/pve.js";
+import { nodeNameSchema, type PveClient } from "../lib/pve.js";
 import { run } from "../lib/result.js";
 import { project, projectionInput, toOptions } from "../lib/project.js";
 
-const nodeParam = z
-  .string()
+const nodeParam = nodeNameSchema
   .optional()
   .describe("Node name. Optional on a single-node install; required on a cluster.");
 
