@@ -44,6 +44,16 @@ export class PveClient {
       entries.map(([k, v]) => [k, typeof v === "boolean" ? (v ? "1" : "0") : String(v)]),
     );
 
+    // A query string written into `path` used to be silently destroyed when the
+    // search string was overwritten below, which surfaced as Proxmox rejecting a
+    // parameter the caller had obviously supplied. Merge instead, letting an
+    // explicit `params` entry win on conflict.
+    if (url.search) {
+      for (const [k, v] of new URLSearchParams(url.search)) {
+        if (!encoded.has(k)) encoded.append(k, v);
+      }
+    }
+
     const headers: Record<string, string> = {
       Authorization: `PVEAPIToken=${this.env.PVE_TOKEN}`,
       "CF-Access-Client-Id": this.env.CF_ACCESS_CLIENT_ID,
@@ -52,6 +62,9 @@ export class PveClient {
     };
 
     let body: string | undefined;
+    // Everything now lives in `encoded`, so clear whatever came in on the path
+    // to avoid sending the same parameter twice on write methods.
+    url.search = "";
     if (upper === "GET" || upper === "DELETE") {
       url.search = encoded.toString();
     } else if (encoded.toString()) {

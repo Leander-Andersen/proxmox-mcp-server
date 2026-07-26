@@ -2,7 +2,16 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Env } from "../env.js";
 import { callExecBridge, sudoEnabled } from "../lib/exec-client.js";
+import { clampOutput } from "../lib/project.js";
 import { fail, run } from "../lib/result.js";
+
+/**
+ * Roughly 10k tokens. The bridge caps at 200k characters, which is a quarter of
+ * a context window from one command -- generous for real output, ruinous for an
+ * unbounded `journalctl`. Raise per-call with max_output when that is genuinely
+ * what you want.
+ */
+const DEFAULT_MAX_OUTPUT = 40_000;
 
 /**
  * Best-effort screen for scripts that are almost certainly a mistake.
@@ -80,9 +89,20 @@ export function registerExecTool(server: McpServer, env: Env): void {
           .max(300)
           .optional()
           .describe("Seconds before the script is killed. Default 30."),
+        max_output: z
+          .number()
+          .int()
+          .positive()
+          .max(200_000)
+          .optional()
+          .describe(
+            "Characters of stdout/stderr to keep, default 40000. Output beyond this is cut from " +
+              "the middle, keeping both ends. Prefer filtering on the host (grep, tail -n, " +
+              "journalctl -n) over raising this.",
+          ),
       },
     },
-    async ({ target, script, timeout }) => {
+    async ({ target, script, timeout, max_output }) => {
       const reason = screen(script);
       if (reason) {
         return fail(
@@ -95,10 +115,16 @@ export function registerExecTool(server: McpServer, env: Env): void {
 
       return run(async () => {
         const result = await callExecBridge(env, { target, script, timeout: timeout ?? 30 });
-        if (result.timed_out) {
-          return { ...result, note: `Script exceeded its ${timeout ?? 30}s timeout and was killed.` };
+        const cap = max_output ?? DEFAULT_MAX_OUTPUT;
+        const clamped = {
+          ...result,
+          stdout: clampOutput(result.stdout ?? "", cap),
+          stderr: clampOutput(result.stderr ?? "", cap),
+        };
+        if (clamped.timed_out) {
+          return { ...clamped, note: `Script exceeded its ${timeout ?? 30}s timeout and was killed.` };
         }
-        return result;
+        return clamped;
       });
     },
   );

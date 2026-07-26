@@ -1,3 +1,5 @@
+# Must match the repo name -- Workers Builds derives the Worker name from the
+# connected repository and overrides a mismatch (then offers a PR to fix it).
 name = "proxmox-mcp-server"
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
@@ -14,6 +16,27 @@ id = "3a7658c1e81e4de495778cc105d0a929"
 [observability]
 enabled = true
 
-# All configuration is delivered as secrets, never as [vars] -- secrets survive
-# a git-triggered redeploy, so EXEC_SUDO_ENABLED can be flipped out-of-band
-# without a push. See README.md.
+# All configuration is delivered as secrets, never as [vars]. Secrets are the
+# only binding type that survives `wrangler deploy`, so a value set in the
+# dashboard is not silently reverted by an unrelated code push. That matters
+# most for EXEC_SUDO_ENABLED, which is the sudo kill switch and must be
+# flippable without a deploy -- even though "true"/"false" is not sensitive.
+#
+# Set with: npx wrangler secret put <NAME>   (or the dashboard)
+#
+#   Phase 1 (required)
+#     MCP_API_KEY                   password typed on the /oauth/authorize page
+#     PVE_HOST                      https://<tunnel-hostname> for pveproxy :8006
+#     PVE_TOKEN                     user@realm!tokenid=uuid
+#     CF_ACCESS_CLIENT_ID           Access service token for that hostname
+#     CF_ACCESS_CLIENT_SECRET
+#
+#   Phase 2 (optional; run_script is only registered when EXEC_HOST is set)
+#     EXEC_HOST                     https://<tunnel-hostname> for the bridge :5000
+#     EXEC_CF_ACCESS_CLIENT_ID      may reuse the Phase 1 token
+#     EXEC_CF_ACCESS_CLIENT_SECRET
+#     EXEC_SHARED_SECRET            must match /etc/claude-exec.env on the host
+#     EXEC_SUDO_ENABLED             "true" enables sudo for target:"host"; absent = disabled
+#     EXEC_SUDO_PASSWORD            only read when EXEC_SUDO_ENABLED is "true"
+#
+# See README.md for the full reference.

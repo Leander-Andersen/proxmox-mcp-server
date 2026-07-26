@@ -50,6 +50,33 @@ Things you can ask for directly:
 - *"What storage do I have configured?"* — no dedicated tool, so this falls to
   `pve_api` with `GET /nodes/<node>/storage`.
 
+**Responses can be trimmed server-side.** `pve_api`, `list_guests`,
+`guest_status`, `node_status` and `list_tasks` all take `fields` and
+`omit_fields`; the list-shaped ones also take `limit`, which keeps the most
+recent entries. Trimming happens before the payload is serialised, so it is a
+real saving rather than a display filter.
+
+Where it matters most:
+
+- A week of `rrddata` is ~330 points of ~20 metrics. Asking for
+  `fields: ["time","mem","maxmem"]` cuts roughly 70%; adding `limit` takes it
+  past 90%.
+- Guest configs from community install scripts carry large HTML blobs in
+  `description`. `omit_fields: ["description"]` removes ~96% of a config read.
+- `list_guests` also takes `status: "running"` to skip stopped guests entirely.
+
+Two things happen automatically, with no parameters:
+
+- **`task_status` fetches the task log only when the task failed or is still
+  running.** The log of a successful start is noise, and this is the most-called
+  tool since every write returns a UPID. Pass `log: true` to force it.
+- **Responses over 2000 characters drop JSON indentation**, worth about a third
+  of a large payload. Smaller ones stay pretty-printed.
+- **`run_script` output is capped at 40000 characters** (~10k tokens), cut from
+  the middle so both ends survive, with a marker saying how much was dropped.
+  Raise it per-call with `max_output` — but filtering on the host with `grep`,
+  `tail -n` or `journalctl -n` is almost always better.
+
 With the bridge installed you additionally get `run_script`:
 
 - *"Check disk usage inside container 101."* — runs `df -h` via `pct exec`.
@@ -119,7 +146,7 @@ and deploys automatically.
    `[vars]` and no real hostname is committed anywhere in this repo.
 4. Check it came up:
    ```bash
-   curl https://proxmox-mcp.<subdomain>.workers.dev/health
+   curl https://proxmox-mcp-server.<subdomain>.workers.dev/health
    ```
    You want `"pve_configured": true`. If a `/health` call returns HTML rather
    than JSON, Access rejected the service token.
@@ -127,7 +154,7 @@ and deploys automatically.
 ### Connect it to Claude
 
 In claude.ai: **Settings → Connectors → Add custom connector**, URL
-`https://proxmox-mcp.<subdomain>.workers.dev/mcp`. You will be sent to an
+`https://proxmox-mcp-server.<subdomain>.workers.dev/mcp`. You will be sent to an
 authorize page — enter the `MCP_API_KEY` value. Only `claude.ai` and
 `claude.com` redirect URIs are accepted.
 
@@ -151,6 +178,59 @@ npx wrangler secret put EXEC_SUDO_ENABLED            # "true" or "false"
 targeting `host` run as the unprivileged bridge user. Claude is never told the
 password and it never appears in a tool result. Flipping it takes effect on the
 next request — no redeploy, no push.
+
+## Configuration reference
+
+Everything is a Worker **secret** — there are no `[vars]`. Secrets are the only
+binding type that survives `wrangler deploy`, so a value set in the dashboard is
+never silently reverted by an unrelated code push. `EXEC_SUDO_ENABLED` is a
+secret for that reason alone, not because `"true"`/`"false"` is sensitive.
+
+Set any of them with `npx wrangler secret put <NAME>`, or in the dashboard under
+**Settings → Variables and Secrets**.
+
+### Phase 1 — required
+
+| Secret | What it is | Where it comes from |
+|---|---|---|
+| `MCP_API_KEY` | Password you type on the authorize page when adding the connector. Also the HMAC key for the bearer tokens the Worker issues. | You invent it. `openssl rand -hex 32` |
+| `PVE_HOST` | Origin of the tunnel hostname in front of pveproxy `:8006`. No trailing slash, no `/api2/json`. | Your Cloudflare Tunnel |
+| `PVE_TOKEN` | Full Proxmox API token, `user@realm!tokenid=uuid` — all three parts, not just the secret. | *Datacenter → Permissions → API Tokens* |
+| `CF_ACCESS_CLIENT_ID` | Access service token id, ends in `.access`. | *Zero Trust → Access → Service Auth* |
+| `CF_ACCESS_CLIENT_SECRET` | The secret half. Shown once. | ditto |
+
+### Phase 2 — optional
+
+`run_script` is not registered at all unless `EXEC_HOST` is set. Setting it
+without the rest means Claude sees the tool and every call fails, so set them
+together.
+
+| Secret | What it is | Where it comes from |
+|---|---|---|
+| `EXEC_HOST` | Origin of the tunnel hostname in front of the bridge `:5000`. | Your Cloudflare Tunnel |
+| `EXEC_CF_ACCESS_CLIENT_ID` | Service token for that hostname. Service tokens are account-level, so the Phase 1 pair may be reused — the token just has to be in that application's policy. | *Zero Trust → Access → Service Auth* |
+| `EXEC_CF_ACCESS_CLIENT_SECRET` | ditto | ditto |
+| `EXEC_SHARED_SECRET` | Second check behind Access. Must match the bridge. | `cat /etc/claude-exec.env` on the host |
+| `EXEC_SUDO_ENABLED` | `"true"` lets `target: "host"` escalate with sudo. **Any other value, or absent, disables it.** | You choose |
+| `EXEC_SUDO_PASSWORD` | OS password of the bridge user. Only read when `EXEC_SUDO_ENABLED` is exactly `"true"`; never returned in a tool result. | The password set by `install.sh --with-host-sudo` |
+
+### Bindings
+
+| Binding | Purpose |
+|---|---|
+| `PROXMOX_KV` | Marks OAuth authorization codes as spent so one cannot be redeemed twice. Entries expire after 5 minutes. Optional — without it the connector still works, you just lose replay protection. |
+
+### Checking what is set
+
+`GET /health` reports configuration state without exposing any value:
+
+```json
+{"status":"ok","version":"1.0.0","pve_configured":true,"exec_configured":true,"sudo_enabled":false}
+```
+
+`pve_configured` means `PVE_HOST` and `PVE_TOKEN` are both present, not that
+they are correct. `exec_configured` reflects `EXEC_HOST` alone — it is what
+decides whether `run_script` appears.
 
 ## Local development
 
@@ -176,22 +256,76 @@ curl -s localhost:8787/mcp -H "Authorization: Bearer $TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-## What is and isn't a security boundary
+## Privilege model
 
-Real boundaries:
+Worth reading once rather than inferring, because the parts interact in ways
+that are easy to get wrong.
 
-- **Cloudflare Access** in front of both tunnel hostnames — nothing reaches
-  Proxmox without the service token.
-- **The bearer token** on `/mcp`, derived by HMAC from `MCP_API_KEY`.
-- **The PVE API token's role** — the ceiling on what the API tools can do.
-- **The bridge user's sudoers file** and **`EXEC_SUDO_ENABLED`**.
+### What the tool layer blocks
 
-Convenience only, not boundaries:
+| Blocked | Where |
+|---|---|
+| `DELETE`, every path | `pve_api` — the only hard write-wall in the Worker |
+| Non-GET to `/access/*` and `/cluster/config/*` | `pve_api` |
+| Writes to `/etc/pve`, `rm -rf` on system paths, `mkfs`, `passwd`, reboots | `run_script` deny-list |
 
-- The `pve_api` guardrails (no `DELETE`, no writes to `/access` or
-  `/cluster/config`) and the `run_script` deny-list. They stop an obvious
-  mistake; they are pattern matches and will not stop a determined encoding.
-  **Set the API token's permissions as though these did not exist.**
+### What it deliberately does not block
+
+- **`POST` and `PUT` to everything else.** These reach Proxmox and are gated by
+  the **API token's role**, not by this Worker. If you widen that role, the
+  Worker will not be what stops a destructive write.
+- **Reads of `/etc/pve`.** The `run_script` guard is *write-scoped*. `ls` and
+  `cat` pass — which is harmless, because the files inside are `root:www-data
+  0640` and the unprivileged bridge user cannot read them anyway.
+- **Arbitrary host commands.** The deny-list is a small blocklist of obviously
+  destructive patterns. It does not reason about whether a command is harmful.
+  `rm -f somefile` on the host runs and is stopped only by filesystem
+  permissions.
+
+### How privilege actually works
+
+This is the part most often stated incorrectly. The bridge account is **not**
+free of sudo rights:
+
+```
+claude ALL=(root) NOPASSWD: /usr/sbin/pct exec *
+claude ALL=(root) NOPASSWD: /usr/sbin/qm guest exec *
+```
+
+Those are **NOPASSWD**, so they apply *regardless of `EXEC_SUDO_ENABLED`* —
+which is exactly why `run_script` gets root inside any container while
+`/health` reports `sudo_enabled: false`. And `pct exec` into a **privileged**
+container is a well-known route back to root on the host.
+
+`EXEC_SUDO_ENABLED` governs one narrow thing: whether the Worker attaches a
+password, which only affects `target: "host"`. It is not a global privilege
+switch, and it does not gate container access.
+
+If the host was installed with `--with-host-sudo`, the account is additionally
+in the `sudo` group with a password — full root, password-gated.
+
+Check what is actually granted rather than assuming:
+
+```bash
+sudo -l -U claude
+```
+
+### The real boundaries
+
+In rough order of how much they carry:
+
+1. **Cloudflare Access** on both tunnel hostnames — nothing reaches Proxmox
+   without the service token.
+2. **The PVE API token's role** — the ceiling on every API tool, and the only
+   thing gating non-DELETE writes.
+3. **The bridge user's sudoers file** — the ceiling on `run_script`. Broad by
+   design, since `pct exec` is the whole point.
+4. **The bearer token** on `/mcp`, HMAC-derived from `MCP_API_KEY`.
+5. **`EXEC_SUDO_ENABLED`** — host-sudo only, per the caveat above.
+
+Everything in "what the tool layer blocks" is a **speed bump, not a boundary**.
+Those are pattern matches; a determined encoding walks through them. Set the API
+token's role and the sudoers file as though the guardrails did not exist.
 
 Nothing sensitive is committed here. Credentials live in Worker secrets, and
 local values in `.dev.vars`, which is gitignored — `.dev.vars.example` shows
