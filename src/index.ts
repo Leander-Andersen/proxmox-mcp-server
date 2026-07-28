@@ -2,12 +2,17 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import type { Env } from "./env.js";
 import { buildServer, SERVER_VERSION } from "./server.js";
 import {
+  authorizeLockedOut,
   authorizePage,
-  constantTimeEqual,
+  clearAuthorizeFailures,
   generateAccessToken,
   generateAuthCode,
   isAllowedRedirectUri,
+  LOCKOUT,
   oauthMetadata,
+  recordAuthorizeFailure,
+  revokeAccessToken,
+  secretEqual,
   validateAccessToken,
   validateAuthCode,
 } from "./auth.js";
@@ -71,6 +76,17 @@ export default {
           500,
         );
       }
+      if (!env.PROXMOX_KV) {
+        return json(
+          {
+            error: "server_error",
+            error_description:
+              "PROXMOX_KV is not bound. It is required for brute-force throttling and " +
+              "single-use authorization codes; refusing to authorize without it.",
+          },
+          500,
+        );
+      }
 
       if (request.method === "GET") {
         const redirectUri = url.searchParams.get("redirect_uri") ?? "";
@@ -105,9 +121,25 @@ export default {
           return json({ error: "invalid_request", error_description: "redirect_uri not allowed" }, 400);
         }
 
-        if (!constantTimeEqual(str("password").trim(), apiKey.trim())) {
+        // Throttle before comparing, so a locked-out client cannot keep guessing.
+        const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+        if (await authorizeLockedOut(env.PROXMOX_KV, ip)) {
+          console.warn(`authorize: ${ip} is locked out after ${LOCKOUT.MAX_FAILURES} failures`);
+          return new Response(
+            `Too many failed attempts. Try again in ${LOCKOUT.LOCKOUT_SECONDS / 60} minutes.`,
+            {
+              status: 429,
+              headers: { "Retry-After": String(LOCKOUT.LOCKOUT_SECONDS), ...VERSION_HEADER },
+            },
+          );
+        }
+
+        if (!(await secretEqual(str("password").trim(), apiKey.trim()))) {
+          const count = await recordAuthorizeFailure(env.PROXMOX_KV, ip);
+          console.warn(`authorize: bad password from ${ip} (${count}/${LOCKOUT.MAX_FAILURES})`);
           return html(authorizePage({ redirectUri, state, codeChallenge, clientId, error: true }));
         }
+        await clearAuthorizeFailures(env.PROXMOX_KV, ip);
 
         const code = await generateAuthCode(apiKey, codeChallenge, redirectUri);
         const redirect = new URL(redirectUri);
@@ -124,11 +156,31 @@ export default {
     if (url.pathname === "/oauth/token" && request.method === "POST") {
       const apiKey = env.MCP_API_KEY;
       if (!apiKey) return json({ error: "server_error" }, 500);
+      if (!env.PROXMOX_KV) {
+        return json(
+          {
+            error: "server_error",
+            error_description:
+              "PROXMOX_KV is not bound. It is required to enforce single-use authorization codes.",
+          },
+          500,
+        );
+      }
 
+      // A malformed body used to throw out here, past the only try/catch in this
+      // handler, and surface as an unhandled 500 rather than invalid_request.
       const contentType = request.headers.get("content-type") ?? "";
-      const params = contentType.includes("application/json")
-        ? new URLSearchParams(await request.json<Record<string, string>>())
-        : new URLSearchParams(await request.text());
+      let params: URLSearchParams;
+      try {
+        params = contentType.includes("application/json")
+          ? new URLSearchParams(await request.json<Record<string, string>>())
+          : new URLSearchParams(await request.text());
+      } catch {
+        return json(
+          { error: "invalid_request", error_description: "Malformed request body" },
+          400,
+        );
+      }
 
       if (params.get("grant_type") !== "authorization_code") {
         return json({ error: "unsupported_grant_type" }, 400);
@@ -152,22 +204,80 @@ export default {
       }
 
       // Authorization codes are single use; KV remembers the ones already spent.
-      if (env.PROXMOX_KV) {
-        const usedKey = `code-used:${result.nonce}`;
-        if (await env.PROXMOX_KV.get(usedKey)) {
-          return json(
-            { error: "invalid_grant", error_description: "Authorization code already used" },
-            400,
-          );
-        }
-        await env.PROXMOX_KV.put(usedKey, "1", { expirationTtl: 300 });
+      // This is still a check-then-set rather than an atomic one, so two truly
+      // simultaneous redemptions can both win. Closing that properly needs a
+      // Durable Object; the code's 5-minute lifetime bounds the exposure.
+      const usedKey = `code-used:${result.nonce}`;
+      if (await env.PROXMOX_KV.get(usedKey)) {
+        return json(
+          { error: "invalid_grant", error_description: "Authorization code already used" },
+          400,
+        );
       }
+      await env.PROXMOX_KV.put(usedKey, "1", { expirationTtl: 300 });
 
       return json({
         access_token: await generateAccessToken(apiKey),
         token_type: "Bearer",
         expires_in: 30 * 24 * 60 * 60,
       });
+    }
+
+    // --- Revocation --------------------------------------------------------
+
+    // Tokens are stateless HMACs with a 30-day life, so without this the only
+    // way to invalidate one is rotating MCP_API_KEY -- which invalidates every
+    // client and changes the login password. Revoking by password is the case
+    // that actually matters: a token you need to kill is usually one you no
+    // longer hold.
+    if (url.pathname === "/oauth/revoke" && request.method === "POST") {
+      const apiKey = env.MCP_API_KEY;
+      if (!apiKey || !env.PROXMOX_KV) return json({ error: "server_error" }, 500);
+
+      let form: URLSearchParams;
+      try {
+        const ct = request.headers.get("content-type") ?? "";
+        form = ct.includes("application/json")
+          ? new URLSearchParams(await request.json<Record<string, string>>())
+          : new URLSearchParams(await request.text());
+      } catch {
+        return json({ error: "invalid_request" }, 400);
+      }
+
+      const bearer = (request.headers.get("Authorization") ?? "").startsWith("Bearer ")
+        ? (request.headers.get("Authorization") as string).slice("Bearer ".length)
+        : "";
+      const password = form.get("password") ?? "";
+      const target = form.get("token") || bearer;
+      const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+
+      if (password) {
+        if (await authorizeLockedOut(env.PROXMOX_KV, ip)) {
+          return json({ error: "too_many_requests" }, 429);
+        }
+        if (!(await secretEqual(password.trim(), apiKey.trim()))) {
+          await recordAuthorizeFailure(env.PROXMOX_KV, ip);
+          return json({ error: "invalid_client" }, 401);
+        }
+        await clearAuthorizeFailures(env.PROXMOX_KV, ip);
+      } else if (!bearer || target !== bearer) {
+        return json(
+          {
+            error: "invalid_client",
+            error_description:
+              "Present the token you are revoking as a Bearer token, or supply the password to " +
+              "revoke an arbitrary one.",
+          },
+          401,
+        );
+      } else if (!(await validateAccessToken(apiKey, bearer, env.PROXMOX_KV))) {
+        return json({ error: "invalid_token" }, 401);
+      }
+
+      if (!target) return json({ error: "invalid_request" }, 400);
+      const revoked = await revokeAccessToken(apiKey, target, env.PROXMOX_KV);
+      console.log(`revoke: ${revoked ? "accepted" : "rejected"} from ${ip}`);
+      return json({ revoked });
     }
 
     // --- Everything below needs a bearer token -----------------------------
@@ -187,7 +297,7 @@ export default {
       });
 
     if (!authHeader.startsWith("Bearer ")) return unauthorized("invalid_request");
-    if (!(await validateAccessToken(apiKey, authHeader.slice("Bearer ".length)))) {
+    if (!(await validateAccessToken(apiKey, authHeader.slice("Bearer ".length), env.PROXMOX_KV))) {
       return unauthorized("invalid_token");
     }
 

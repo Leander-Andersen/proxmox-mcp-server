@@ -18,6 +18,11 @@ export interface Env {
   /** "true" enables sudo for target: "host". Anything else disables it. */
   EXEC_SUDO_ENABLED?: string;
 
-  /** One-time-use tracking for OAuth authorization codes. */
-  PROXMOX_KV?: KVNamespace;
+  /**
+   * Required. Backs one-time use of authorization codes, the token revocation
+   * deny-list, and brute-force throttling on /oauth/authorize. It used to be
+   * optional, which meant a deployment without it silently lost replay
+   * protection; the endpoints now fail closed instead.
+   */
+  PROXMOX_KV: KVNamespace;
 }

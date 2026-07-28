@@ -129,8 +129,10 @@ and deploys automatically.
    npx wrangler kv namespace create PROXMOX_KV
    ```
    Do this **before** connecting the repo; a placeholder id fails the build.
-   The namespace does one job — stopping an OAuth authorization code from being
-   redeemed twice. It holds nothing else, and entries expire after 5 minutes.
+   The namespace is **required** — `/oauth/authorize` and `/oauth/token` return
+   500 without it rather than silently dropping the protections it backs. It
+   holds three kinds of short-lived entry and nothing else: spent authorization
+   codes, revoked access tokens, and failed-password counters.
 2. In the Cloudflare dashboard: **Workers & Pages → Create → Workers → Import a
    repository**. Defaults are correct: build `npm install`, deploy
    `npx wrangler deploy`.
@@ -157,6 +159,23 @@ In claude.ai: **Settings → Connectors → Add custom connector**, URL
 `https://proxmox-mcp-server.<subdomain>.workers.dev/mcp`. You will be sent to an
 authorize page — enter the `MCP_API_KEY` value. Only `claude.ai` and
 `claude.com` redirect URIs are accepted.
+
+Five wrong passwords from one IP locks that IP out for 15 minutes. The page is
+public and the password behind it reaches `run_script`, so an unthrottled guess
+was the cheapest way in.
+
+### Revoking a token
+
+Access tokens last 30 days. To kill one without rotating `MCP_API_KEY` (which
+would invalidate every client and change the login password):
+
+```bash
+curl -X POST https://proxmox-mcp-server.<subdomain>.workers.dev/oauth/revoke \
+  -d "password=$MCP_API_KEY&token=$TOKEN_TO_KILL"
+```
+
+A client can also revoke its own token by presenting it as a bearer token with
+no password. Revocation is remembered until the token would have expired anyway.
 
 ### Phase 2 secrets
 
@@ -218,7 +237,7 @@ together.
 
 | Binding | Purpose |
 |---|---|
-| `PROXMOX_KV` | Marks OAuth authorization codes as spent so one cannot be redeemed twice. Entries expire after 5 minutes. Optional — without it the connector still works, you just lose replay protection. |
+| `PROXMOX_KV` | **Required.** Marks OAuth authorization codes as spent so one cannot be redeemed twice, holds the access-token revocation list, and counts failed password attempts for lockout. All entries expire on their own. The OAuth endpoints fail closed without it. |
 
 ### Checking what is set
 
@@ -239,7 +258,13 @@ npm install
 cp .dev.vars.example .dev.vars   # fill in real values; it is gitignored
 npm run dev
 npm run typecheck
+npm test
 ```
+
+`npm test` covers path handling: that `node` cannot be anything but a DNS label,
+and that the read-only guard on `pve_api` inspects the same path Proxmox
+receives. Both were places where a crafted value reached `/access/*` — see the
+privilege model below.
 
 The tunnel hostname is publicly reachable, so `wrangler dev` can talk to the
 real Proxmox API. To call `/mcp` by hand you need a bearer token; mint one with
@@ -266,17 +291,30 @@ that are easy to get wrong.
 | Blocked | Where |
 |---|---|
 | `DELETE`, every path | `pve_api` — the only hard write-wall in the Worker |
-| Non-GET to `/access/*` and `/cluster/config/*` | `pve_api` |
+| Non-GET to `/access/*` and `/cluster/config/*` | `pve_api`, checked against the **resolved** path |
+| Any path escaping `/api2/json` | `PveClient`, for every tool |
+| `node` that is not a DNS label | schema, and again in `resolveGuest`/`resolveNode` |
 | Writes to `/etc/pve`, `rm -rf` on system paths, `mkfs`, `passwd`, reboots | `run_script` deny-list |
+
+The last two exist because `node` and `path` are interpolated into API URLs, and
+`new URL` collapses `..` while `fetch` discards anything after `#`. Before that
+was constrained, a crafted `node` on `start_guest` — or a `..` in a `pve_api`
+path — reached `POST /access/*` and could mint a Proxmox API token. `npm test`
+holds that closed.
 
 ### What it deliberately does not block
 
 - **`POST` and `PUT` to everything else.** These reach Proxmox and are gated by
   the **API token's role**, not by this Worker. If you widen that role, the
   Worker will not be what stops a destructive write.
+
+  This is worth acting on rather than just knowing: scope `PVE_TOKEN` to the
+  least role that does your job (`PVEVMAdmin` on `/vms` for lifecycle work,
+  `PVEAuditor` on `/` for reads). A token that cannot touch `/access` makes the
+  whole class of path bugs above unexploitable, whatever the Worker does.
 - **Reads of `/etc/pve`.** The `run_script` guard is *write-scoped*. `ls` and
   `cat` pass — which is harmless, because the files inside are `root:www-data
-  0640` and the unprivileged bridge user cannot read them anyway.
+  0640` and the unprivileged script account cannot read them anyway.
 - **Arbitrary host commands.** The deny-list is a small blocklist of obviously
   destructive patterns. It does not reason about whether a command is harmful.
   `rm -f somefile` on the host runs and is stopped only by filesystem
@@ -288,18 +326,26 @@ This is the part most often stated incorrectly. The bridge account is **not**
 free of sudo rights:
 
 ```
-claude ALL=(root) NOPASSWD: /usr/sbin/pct exec *
-claude ALL=(root) NOPASSWD: /usr/sbin/qm guest exec *
+claude ALL=(root)       NOPASSWD: /usr/sbin/pct exec *
+claude ALL=(root)       NOPASSWD: /usr/sbin/qm guest exec *
+claude ALL=(claude-run) NOPASSWD: ALL
 ```
 
-Those are **NOPASSWD**, so they apply *regardless of `EXEC_SUDO_ENABLED`* —
-which is exactly why `run_script` gets root inside any container while
-`/health` reports `sudo_enabled: false`. And `pct exec` into a **privileged**
-container is a well-known route back to root on the host.
+The first two are **NOPASSWD**, so they apply *regardless of
+`EXEC_SUDO_ENABLED`* — which is exactly why `run_script` gets root inside any
+container while `/health` reports `sudo_enabled: false`. And `pct exec` into a
+**privileged** container is a well-known route back to root on the host.
 
 `EXEC_SUDO_ENABLED` governs one narrow thing: whether the Worker attaches a
 password, which only affects `target: "host"`. It is not a global privilege
 switch, and it does not gate container access.
+
+What it *does* now do reliably is bound `target: "host"`. The third rule runs
+unprivileged host scripts as `claude-run`, an account that owns nothing — so
+with sudo disabled a host script can no longer read the bridge's shared secret,
+rewrite its code, or wait around for you to enable sudo. Before that split it
+ran as the bridge's own user and could do all three, which made the kill switch
+a delay rather than a boundary. See the bridge repo's INSTALL.md.
 
 If the host was installed with `--with-host-sudo`, the account is additionally
 in the `sudo` group with a password — full root, password-gated.
