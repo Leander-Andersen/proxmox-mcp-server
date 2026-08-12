@@ -9,7 +9,7 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "pretest": "tsc -p tsconfig.test.json",
-    "test": "node test/paths.mjs"
+    "test": "node test/paths.mjs && node test/migrate.mjs && node test/settings.mjs && node test/config.mjs && node test/audit.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

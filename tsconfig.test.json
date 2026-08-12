@@ -1,10 +1,20 @@
-// Emits just the pure path/validation helpers into dist/ so test/paths.mjs can
-// exercise the real implementation rather than a copy of it.
+// Emits the modules the tests exercise into dist/, so they run against the real
+// implementation rather than a copy of it. Everything listed here has to be
+// importable outside the Workers runtime -- audit.ts and settings.ts qualify
+// because their Workers-specific types (D1Database, KVNamespace, McpServer) are
+// all `import type` and erase at compile time.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
     "outDir": "dist"
   },
-  "include": ["src/lib/pve.ts", "src/env.ts"]
+  "include": [
+    "src/lib/pve.ts",
+    "src/lib/audit.ts",
+    "src/lib/config.ts",
+    "src/lib/migrate.ts",
+    "src/lib/settings.ts",
+    "src/env.ts"
+  ]
 }
