@@ -6,12 +6,35 @@ compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
 account_id = "fa8dc1730bfd7b376de59d07758e28b5"
 
-# Used only to enforce one-time use of OAuth authorization codes.
+# Enforces one-time use of OAuth authorization codes, backs the token revocation
+# deny-list and login throttling, and stores the runtime settings blob.
 # Create with:  npx wrangler kv namespace create PROXMOX_KV
 # then paste the returned id below.
 [[kv_namespaces]]
 binding = "PROXMOX_KV"
 id = "3a7658c1e81e4de495778cc105d0a929"
+
+# The audit log: a real SQLite database, holding every tool call and every
+# authentication event. Create it with:
+#
+#   npx wrangler d1 create proxmox-mcp-audit      # paste the id below
+#
+# That is the whole setup. There is no schema step: the Worker carries the schema
+# it expects (src/lib/migrate.ts) and brings the database up to it on first use,
+# so a deploy that adds a migration applies it by itself.
+#
+# Until the id is filled in, `wrangler deploy` will reject this file. Comment the
+# block out to deploy without an audit log -- the binding is optional in code and
+# /health reports whether it is present.
+[[d1_databases]]
+binding = "AUDIT_DB"
+database_name = "proxmox-mcp-audit"
+database_id = "47baa162-a8b8-4f15-8082-a88de553f141"
+
+# Nightly retention sweep. How much it deletes is a KV setting rather than a
+# constant here (default: keep one year); this only decides when it runs.
+[triggers]
+crons = ["17 4 * * *"]
 
 [observability]
 enabled = true
