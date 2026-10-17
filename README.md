@@ -477,6 +477,16 @@ response latency, and a database that is down or unbound produces a
 log that can take the server down is a liability dressed as a control. Watch
 `audit_configured` on `/health` if that trade bothers you.
 
+
+### Sharing the database with other MCP servers
+
+Other MCP servers (e.g. bookstack-mcp-server) can log into this same D1 to
+stay within Workers Free. Each writes only its own prefixed tables and one row
+in the shared `audit_instances` registry; this server's tables keep their
+unprefixed names and it registers itself as instance `proxmox`, with its tool
+list and logging settings. Hindsight reads the registry to discover every
+instance -- see its README.
+
 ## Local development
 
 ```bash

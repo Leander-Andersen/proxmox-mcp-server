@@ -24,6 +24,7 @@ import { z } from "zod";
 import { fakeD1, tables } from "./d1.mjs";
 import { Auditor, auditToolCalls, isMutating, sweepAuditLog } from "../dist/lib/audit.js";
 import { DEFAULT_SETTINGS } from "../dist/lib/settings.js";
+import { resetRegistryMemo } from "../dist/lib/registry.js";
 
 let pass = 0;
 let fail = 0;
@@ -389,6 +390,42 @@ console.log("\n== retention sweep ==");
 
   const second = await sweepAuditLog(db, { ...DEFAULT_SETTINGS, audit_retention_days: 365 });
   ok("a second sweep finds nothing", second.tool_calls === 0 && second.auth_events === 0);
+}
+
+console.log("\n== shared audit registry ==");
+{
+  const db = fakeD1();
+  const { audit, settle } = makeAuditor(db);
+  const server = new McpServer({ name: "t", version: "0" });
+  auditToolCalls(server, audit);
+  server.registerTool("stop_guest", { title: "Stop", description: "Hard stop", inputSchema: { vmid: z.number() } }, async () => ({ content: [] }));
+  server.registerTool("list_guests", { description: "List", inputSchema: {} }, async () => ({ content: [] }));
+  audit.toolCall({ tool: "stop_guest", args: { vmid: 1 }, result: { content: [] }, durationMs: 1 });
+  await settle();
+
+  const reg = db.query("SELECT * FROM audit_instances");
+  ok("registers itself once", reg.length === 1 && reg[0].instance_id === "proxmox");
+  ok("points at the existing unprefixed tables", reg[0].tool_calls_table === "tool_calls" && reg[0].auth_events_table === "auth_events");
+  const tools = JSON.parse(reg[0].tools_json);
+  ok("publishes its tools", tools.length === 2 && tools[0].name === "stop_guest" && tools[0].mutating === true && tools[1].mutating === false);
+  ok("publishes what it logs", JSON.parse(reg[0].settings_json).logs_reads === true);
+  ok("the audit row is still written", calls(db).length === 1);
+
+  // Another server already owns the id: its row is left alone, logging still works.
+  const other = fakeD1();
+  other.raw.exec(`CREATE TABLE audit_instances (instance_id TEXT PRIMARY KEY, server TEXT NOT NULL, display_name TEXT NOT NULL,
+    format INTEGER NOT NULL, tool_calls_table TEXT NOT NULL, auth_events_table TEXT, schema_version INTEGER NOT NULL,
+    settings_json TEXT, tools_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+  other.raw.exec("INSERT INTO audit_instances VALUES ('proxmox', 'someone-else', 'Theirs', 1, 'x_tool_calls', NULL, 1, NULL, NULL, 0, 0)");
+  resetRegistryMemo(other);
+  const quiet = console.error;
+  console.error = () => {};
+  const second = makeAuditor(other);
+  second.audit.toolCall({ tool: "list_guests", args: {}, result: { content: [] }, durationMs: 1 });
+  await second.settle();
+  console.error = quiet;
+  ok("a foreign registry row is not overwritten", other.query("SELECT display_name FROM audit_instances")[0].display_name === "Theirs");
+  ok("and audit writes carry on regardless", calls(other).length === 1);
 }
 
 console.log(`\n${"=".repeat(46)}\n  ${pass} passed, ${fail} failed\n${"=".repeat(46)}`);

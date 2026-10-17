@@ -21,6 +21,9 @@ export function fakeD1(hooks = {}) {
       const result = raw.prepare(sql).run(...params);
       return { meta: { changes: Number(result.changes ?? 0) } };
     },
+    async first() {
+      return raw.prepare(sql).get(...params) ?? null;
+    },
     async all() {
       const results = raw.prepare(sql).all(...params);
       // Lets a test slip another isolate's write in between our read of the

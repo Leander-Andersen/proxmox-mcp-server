@@ -20,6 +20,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Settings } from "./settings.js";
 import { ensureSchemaOnce } from "./migrate.js";
+import { registerOnce, type ManifestTool } from "./registry.js";
 
 // --- Actor identification ----------------------------------------------------
 
@@ -201,6 +202,27 @@ export class Auditor {
    */
   readonly handled: string[] = [];
 
+  /**
+   * Every tool registered on this request's server, for the shared audit
+   * registry (lib/registry.ts) -- so a viewer can label a tool added later
+   * without being updated. Filled in by auditToolCalls.
+   */
+  readonly tools: ManifestTool[] = [];
+
+  /**
+   * Schema first, then this server's registry row. The registry is a
+   * convenience for viewers, so failing to write it is logged and the audit
+   * row is still written.
+   */
+  private async prepare(settings: Settings): Promise<void> {
+    await ensureSchemaOnce(this.db!);
+    try {
+      await registerOnce(this.db!, settings, this.tools);
+    } catch (e) {
+      console.error(`audit: registry update failed (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+
   constructor(
     private readonly db: D1Database | undefined,
     private readonly ctx: ExecutionContext | undefined,
@@ -293,7 +315,7 @@ export class Auditor {
             ? text
             : null;
 
-      await ensureSchemaOnce(this.db!);
+      await this.prepare(settings);
       await this.db!.prepare(
         `INSERT INTO tool_calls (
            ts, request_id, actor_nonce, actor_issued, client_id, ip, country, user_agent,
@@ -336,8 +358,9 @@ export class Auditor {
   ): void {
     if (!this.db) return;
     this.enqueue(async () => {
-      if (!(await this.settings()).audit_enabled) return;
-      await ensureSchemaOnce(this.db!);
+      const settings = await this.settings();
+      if (!settings.audit_enabled) return;
+      await this.prepare(settings);
       await this.db!.prepare(
         `INSERT INTO auth_events (ts, request_id, event, ip, country, user_agent, client_id, token_nonce, detail)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)`,
@@ -381,8 +404,17 @@ export function auditToolCalls(server: McpServer, audit: Auditor): void {
   const target = server as unknown as { registerTool: AnyRegister };
   const register = target.registerTool.bind(server);
 
-  target.registerTool = (name, config, cb) =>
-    register(name, config, (async (...a: never[]) => {
+  target.registerTool = (name, config, cb) => {
+    const meta = config as { title?: unknown; description?: unknown };
+    audit.tools.push({
+      name,
+      title: typeof meta?.title === "string" ? meta.title : name,
+      description: typeof meta?.description === "string" ? meta.description.slice(0, 400) : "",
+      // pve_api is a mutation only on a non-GET method; listed as one so a
+      // viewer never under-states what it can do.
+      mutating: name === "pve_api" || isMutating(name, undefined),
+    });
+    return register(name, config, (async (...a: never[]) => {
       // With an inputSchema the handler is (args, extra); without one it is
       // just (extra). Every tool here has a schema, but guessing wrong would
       // silently log the extra object as the arguments, so check rather than
@@ -398,6 +430,7 @@ export function auditToolCalls(server: McpServer, audit: Auditor): void {
         throw error;
       }
     }) as (...a: never[]) => unknown);
+  };
 }
 
 // --- Retention ---------------------------------------------------------------
